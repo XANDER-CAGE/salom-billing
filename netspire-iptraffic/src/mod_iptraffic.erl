@@ -149,6 +149,8 @@ accounting_request(_Response, ?ACCT_START, Request, _Client) ->
     IP = radius:attribute_value("Framed-IP-Address", Request),
     SID = radius:attribute_value("Acct-Session-Id", Request),
     CID = radius:attribute_value("Calling-Station-Id", Request),
+    ?INFO_MSG("ACCT-START received: UserName=~s, IP=~s, SID=~s, MAC=~s~n",
+              [UserName, inet_parse:ntoa(IP), SID, CID]),
     case iptraffic_session:start(UserName, IP, SID, CID) of
         ok ->
             ?INFO_MSG("Session started for Username: ~s, IP: ~s, SID: ~s, MAC: ~s~n",
