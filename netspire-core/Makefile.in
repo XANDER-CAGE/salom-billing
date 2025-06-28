@@ -1,0 +1,66 @@
+SUBDIRS = src/radius src src/modules src/netflow
+
+DESTDIR = @prefix@
+
+NETSPIRE_DIR = $(DESTDIR)@libdir@/netspire
+
+BEAMDIR = $(NETSPIRE_DIR)/ebin
+PRIVDIR = $(NETSPIRE_DIR)/priv
+SPOOLDIR = $(DESTDIR)@localstatedir@/lib/netspire
+SBINDIR = $(DESTDIR)@sbindir@
+LOGDIR = $(DESTDIR)@localstatedir@/log/netspire
+ETCDIR = $(DESTDIR)@sysconfdir@/netspire
+
+all: checks all-recursive
+	test -r netspire.app && cp netspire.app ebin
+
+checks:
+	test -d ebin || mkdir ebin
+
+all-recursive clean-recursive distclean-recursive:
+	@subdirs="$(SUBDIRS)"; for subdir in $$subdirs; do \
+	target=`echo $@|sed 's,-recursive,,'`; \
+	echo making $$target in $$subdir; \
+	(cd $$subdir && $(MAKE) $$target) || exit 1; \
+	done
+
+install: all
+	install -d $(BEAMDIR)
+	install -m 644 ebin/*.beam $(BEAMDIR)
+	install -m 644 netspire.app $(BEAMDIR)
+	install -d -m 750 $(SPOOLDIR)
+	install -d $(SBINDIR)
+	install -d $(PRIVDIR)
+	install -d $(PRIVDIR)/radius
+	install -m 644 priv/radius/* $(PRIVDIR)/radius
+	install -d -m 750 $(ETCDIR)
+	install -m 644 *.conf.sample $(ETCDIR)
+	install -d -m 750 $(LOGDIR)
+	sed < netspirectl.in > netspirectl \
+		-e 's!%%ERL%%!@ERL@!g' \
+		-e 's!%%SPOOLDIR%%!$(SPOOLDIR)!g' \
+		-e 's!%%BEAMDIR%%!$(BEAMDIR)!g' \
+		-e 's!%%ERL%%!@ERL@!g' \
+		-e 's!%%NETSPIRE_LOG%%!$(LOGDIR)/netspire.log!g' \
+		-e 's!%%NETSPIRE_CONFIG%%!$(ETCDIR)/netspire.conf!g'
+	install -m 755 netspirectl $(SBINDIR)
+
+run: all
+	@ERL@ +W w -pa ebin -mnesia dir \"/tmp/netspire\" -sname netspire \
+		-netspire config \"netspire.conf\" -netspire logfile \"/tmp/netspire.log\" \
+		-eval 'application:start(netspire).'
+
+test: all
+	(cd test && make)
+
+clean: clean-recursive
+	rm -f erl_crash.dump netspirectl
+	find . -name "*~" -exec rm -f {} \;
+
+distclean: clean clean-recursive distclean-recursive
+	rm -f config.status
+	rm -f config.log
+	rm -f Makefile
+	rm -f configure
+	rm -f erl_crash.dump
+	rm -rf ebin autom4te.cache

@@ -1,0 +1,10 @@
+ebin
+*.conf
+*.log
+Makefile
+configure
+config.status
+autom4te.cache/*
+erl_crash.dump
+netspirectl
+!test/Makefile

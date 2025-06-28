@@ -1,0 +1,169 @@
+-module(mod_iptraffic_pgsql).
+
+-behaviour(gen_module).
+
+-export([fetch_account/1, start_session/5, sync_session/3, stop_session/4]).
+
+%% gen_module callbacks
+-export([start/1, stop/0]).
+
+-include("netspire.hrl").
+
+-import(lists, [map/2, reverse/1]).
+
+start(_Options) ->
+    ?INFO_MSG("Starting dynamic module ~p~n", [?MODULE]).
+
+stop() ->
+    ?INFO_MSG("Stopping dynamic module ~p~n", [?MODULE]).
+
+-spec fetch_account(string()) -> {ok, term()} | undefined.
+fetch_account(UserName) ->
+    Q = "SELECT a.id, a.password, a.plan_data, a.plan_id,"
+	" p.auth_algo, p.acct_algo, c.balance, c.currency_id, COALESCE(sp.credit, 0.0)"
+	" FROM accounts a LEFT OUTER JOIN service_params sp ON a.id=sp.account_id, plans p, contracts c"
+	" WHERE a.active AND a.login=$1 AND a.plan_id=p.id AND a.contract_id=c.id",
+    case execute(Q, [UserName]) of
+	{ok, _, []} ->
+	    undefined;
+	{ok, _, [{Id, Password, PData, PId, Auth, Acct, Balance, Currency, Credit}]} ->
+	    Credit1 = list_to_float(binary_to_list(Credit)),
+	    PlanData = dict:store(<<"CREDIT">>, Credit1, from_json(PData)),
+	    SessionData = dict:from_list([{details, dict:new()},
+					  {octets_in, 0},
+					  {octets_out, 0},
+					  {amount, 0.0}]),
+	    Balance1 = list_to_float(binary_to_list(Balance)),
+	    Context = dict:from_list([{user_id, Id},
+				      {plan_data, PlanData},
+				      {currency, Currency},
+				      {balance, Balance1},
+				      {auth_algo, split_algo_name(Auth)},
+				      {acct_algo, split_algo_name(Acct)},
+				      {session_data, SessionData}]),
+	    Replies = fetch_radius_avpairs(Id, PId),
+	    {ok, {binary_to_list(Password), Replies, Context}};
+	_ ->
+	    undefined
+    end.
+
+-spec split_algo_name(binary()) -> {atom(), atom()}.
+split_algo_name(Name) when is_binary(Name) ->
+    split_algo_name([], binary_to_list(Name)).
+split_algo_name(Left, [$: | Tail]) when is_list(Left), is_list(Tail) ->
+    {list_to_atom(reverse(Left)), list_to_atom(Tail)};
+split_algo_name(Left, [Head | Tail]) when is_list(Left), is_list(Tail) ->
+    split_algo_name([Head | Left], Tail).
+
+-spec fetch_radius_avpairs(integer(), integer()) -> [{list(), list()}].    
+fetch_radius_avpairs(UserId, PlanId) when is_integer(UserId), is_integer(PlanId) ->
+    Q = "SELECT a.name, v.value FROM radius_replies a, assigned_radius_replies v"
+	" WHERE a.active AND a.id = v.radius_reply_id"
+	" AND ((v.target_type='Account' AND v.target_id=$1) OR (v.target_type='Plan' AND v.target_id=$2))",
+    {ok, _, Rows} = execute(Q, [UserId, PlanId]),
+    F = fun({N, V}) -> {binary_to_list(N), binary_to_list(V)} end,
+    [F(R) || R <- Rows].
+
+to_json(Term) ->
+    mochijson2:encode(dict_to_struct(Term)).
+
+dict_to_struct(T) when is_integer(T);
+		       is_float(T);
+		       is_binary(T);
+		       is_atom(T) ->
+    T;
+dict_to_struct(L) when is_list(L) ->
+    dict_to_struct([], L);
+dict_to_struct(Dict) ->
+    F = fun({K, V}) -> {K, dict_to_struct(V)} end,
+    {struct, map(F, dict:to_list(Dict))}.
+
+dict_to_struct(Acc, []) ->
+    reverse(Acc);
+dict_to_struct(Acc, [H|T]) ->
+    dict_to_struct([dict_to_struct(H) | Acc], T).
+
+from_json(Json) when is_binary(Json)->
+    struct_to_dict(mochijson2:decode(binary_to_list(Json))).
+
+struct_to_dict(T) when is_integer(T);
+		       is_float(T);
+		       is_binary(T);
+		       is_atom(T) ->
+    T;
+struct_to_dict(L) when is_list(L) ->
+    struct_to_dict([], L);
+struct_to_dict({struct, List}) when is_list(List) ->
+    F = fun({K, V}) -> {K, struct_to_dict(V)} end,
+    dict:from_list(map(F, List)).
+
+struct_to_dict(Acc, []) ->
+    reverse(Acc);
+struct_to_dict(Acc, [H|T]) ->
+    struct_to_dict([struct_to_dict(H) | Acc], T).
+
+start_session(Context, IP, SID,CID, StartedAt) ->
+    Q = "INSERT INTO iptraffic_sessions(account_id, ip, sid, cid, started_at)"
+	" VALUES ($1, $2, $3, $4, $5)",
+    Args = [dict:fetch(user_id, Context),
+	    inet_parse:ntoa(IP),
+	    SID,
+	    CID,
+	    calendar:now_to_universal_time(StartedAt)],
+    {ok, 1} = execute(Q, Args).
+
+sync_session(Context, SID, UpdatedAt) ->
+    SessionData = dict:fetch(session_data, Context),
+    Q = "UPDATE iptraffic_sessions SET octets_in = $1, octets_out = $2,"
+	" updated_at = $3, amount = $4"
+	" WHERE sid = $5 AND account_id = $6",
+    Args = [dict:fetch(octets_in, SessionData),
+	    dict:fetch(octets_out, SessionData),
+	    calendar:now_to_universal_time(UpdatedAt),
+	    dict:fetch(amount, SessionData),
+	    SID,
+	    dict:fetch(user_id, Context)],
+    {ok, 1} = execute(Q, Args).
+
+store_detail(Id, Class, [Input, Output])
+  when is_integer(Id), is_integer(Input), is_integer(Output) ->
+    Q = "INSERT INTO session_details (id, traffic_class, octets_in, octets_out) VALUES ($1, $2, $3, $4)",
+    {ok, 1} = execute(Q, [Id, Class, Input, Output]).
+
+stop_session(Context, SID, FinishedAt, Expired) ->
+    % this mess should be fixed. transactions should be used.. what else?
+    SessionData = dict:fetch(session_data, Context),
+    UserId = dict:fetch(user_id, Context),
+    Amount = dict:fetch(amount, SessionData),
+    Q = "SELECT id FROM iptraffic_sessions"
+	" WHERE sid = $1 AND finished_at IS NULL AND account_id = $2 LIMIT 1",
+    case execute(Q, [SID, UserId]) of
+	{ok, _, [{SessionId}]} ->
+	    Comment = "session " ++ integer_to_list(SessionId),
+	    Currency = dict:fetch(currency, Context),
+	    Q1 = "SELECT debit_transaction($1, $2, $3, $4)",
+	    {ok, _, _} = execute(Q1, [UserId, Amount, Comment, Currency]),
+	    Q2 = "UPDATE iptraffic_sessions"
+		" SET octets_in = $1, octets_out = $2, amount = $3,"
+		" finished_at = $4, expired = $5"
+		" WHERE id = $6",
+	    Args2 = [dict:fetch(octets_in, SessionData),
+		     dict:fetch(octets_out, SessionData),
+		     Amount,
+		     calendar:now_to_universal_time(FinishedAt),
+		     Expired,
+		     SessionId],
+	    {ok, 1} = execute(Q2, Args2),
+	    Q3 = "UPDATE accounts SET plan_data = $1 WHERE id = $2",
+	    {ok, 1} = execute(Q3, [to_json(dict:fetch(plan_data, Context)),
+				   UserId]),
+	    dict:fold(fun (Class, Octets, _) ->
+			      store_detail(SessionId, Class, Octets),
+			      ok
+		      end, ok, dict:fetch(details, SessionData));
+	{ok, _, []} ->
+	    ok
+    end.
+
+execute(Q, Params) ->
+    mod_postgresql:execute(Q, Params).
