@@ -124,6 +124,7 @@ CREATE TABLE iptraffic_sessions(
     id INTEGER NOT NULL DEFAULT NEXTVAL('iptraffic_sessions_id_seq') PRIMARY KEY,
     account_id INTEGER NOT NULL REFERENCES accounts(id),
     sid VARCHAR(128) NOT NULL,
+    cid VARCHAR(128),
     ip VARCHAR(128) NOT NULL,
     octets_in BIGINT DEFAULT 0,
     octets_out BIGINT DEFAULT 0,

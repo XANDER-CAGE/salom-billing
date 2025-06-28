@@ -151,8 +151,8 @@ accounting_request(_Response, ?ACCT_START, Request, _Client) ->
     CID = radius:attribute_value("Calling-Station-Id", Request),
     case iptraffic_session:start(UserName, IP, SID, CID) of
         ok ->
-            ?INFO_MSG("Session started for Username: ~s, SID: ~p~n",
-		      [UserName, SID, CID]),
+            ?INFO_MSG("Session started for Username: ~s, IP: ~s, SID: ~s, MAC: ~s~n",
+		      [UserName, inet_parse:ntoa(IP), SID, CID]),
             #radius_packet{code = ?ACCT_RESPONSE};
         _Error ->
             noreply

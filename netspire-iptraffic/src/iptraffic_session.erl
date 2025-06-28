@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, prepare/5, start/3, interim/1, stop/1, expire/1, handle_packet/2, list/0, list/1]).
+-export([start_link/1, prepare/5, start/4, interim/1, stop/1, expire/1, handle_packet/2, list/0, list/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
@@ -22,10 +22,10 @@ start_link(UUID) ->
 prepare(Pid, UserName, Extra, Response, Client) ->
     gen_server:call(Pid, {prepare, UserName, Extra, Response, Client}).
 
-start(UserName, IP, SID) ->
+start(UserName, IP, SID, CID) ->
     case fetch({new, UserName}) of
         {ok, State} ->
-            gen_server:call(State#ipt_session.pid, {start, IP, SID});
+            gen_server:call(State#ipt_session.pid, {start, IP, SID, CID});
         Error ->
             Error
     end.
@@ -104,9 +104,11 @@ handle_call({prepare, UserName, Context, Response, Client}, _From, State) ->
     mnesia:dirty_write(NewState),
     {reply, ok, NewState};
 handle_call({start, IP, SID, CID}, _From, State) ->
+    ?INFO_MSG("Starting session with MAC: UserName=~s, IP=~s, SID=~s, MAC=~s~n",
+              [State#ipt_session.username, inet_parse:ntoa(IP), SID, CID]),
     F = fun() ->
             mnesia:delete_object(State),
-            NewState = State#ipt_session{sid = SID, ip = IP, status = active},
+            NewState = State#ipt_session{sid = SID, cid = CID, ip = IP, status = active},
             mnesia:write(NewState),
             NewState
         end,
@@ -114,6 +116,8 @@ handle_call({start, IP, SID, CID}, _From, State) ->
         {atomic, NewState} ->
             Context = NewState#ipt_session.data,
             mod_iptraffic_pgsql:start_session(Context, IP, SID, CID, now()),
+            ?INFO_MSG("Session MAC saved to DB: UserName=~s, MAC=~s~n",
+                      [NewState#ipt_session.username, CID]),
 	    {reply, ok, NewState};
         Aborted ->
             Reply = {error, Aborted},

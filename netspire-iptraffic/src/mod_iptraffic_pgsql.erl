@@ -103,14 +103,16 @@ struct_to_dict(Acc, [H|T]) ->
     struct_to_dict([struct_to_dict(H) | Acc], T).
 
 start_session(Context, IP, SID,CID, StartedAt) ->
+    UserId = dict:fetch(user_id, Context),
+    IPStr = inet_parse:ntoa(IP),
+    ?INFO_MSG("Saving session to DB: UserID=~p, IP=~s, SID=~s, MAC=~s~n",
+              [UserId, IPStr, SID, CID]),
     Q = "INSERT INTO iptraffic_sessions(account_id, ip, sid, cid, started_at)"
 	" VALUES ($1, $2, $3, $4, $5)",
-    Args = [dict:fetch(user_id, Context),
-	    inet_parse:ntoa(IP),
-	    SID,
-	    CID,
-	    calendar:now_to_universal_time(StartedAt)],
-    {ok, 1} = execute(Q, Args).
+    Args = [UserId, IPStr, SID, CID, calendar:now_to_universal_time(StartedAt)],
+    Result = execute(Q, Args),
+    ?INFO_MSG("DB insert result: ~p for MAC=~s~n", [Result, CID]),
+    {ok, 1} = Result.
 
 sync_session(Context, SID, UpdatedAt) ->
     SessionData = dict:fetch(session_data, Context),
